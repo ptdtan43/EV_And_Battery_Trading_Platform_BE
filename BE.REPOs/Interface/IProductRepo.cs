@@ -1,0 +1,29 @@
+﻿using BE.BOs.Models;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace BE.REPOs.Interface
+{
+    public interface IProductRepo
+    {
+        List<Product> GetAllProducts();
+        Product GetProductById(int id);
+        Product CreateProduct(Product product);
+        Product UpdateProduct(Product product);
+        bool DeleteProduct(int id);
+        List<Product> GetProductsBySellerId(int sellerId);
+        List<Product> GetDraftProducts();
+        Product ApproveProduct(int id);
+        Product RejectProduct(int id, string? rejectionReason = null);
+        List<Product> GetActiveProducts();
+        List<Product> GetProductsByLicensePlate(string licensePlate);
+        Product GetProductByExactLicensePlate(string licensePlate);
+        List<Product> GetProductsByType(string productType);
+        List<Product> GetReSubmittedProducts();
+        Product ResubmitProduct(int id);
+        List<Product> GetRejectedProductsBySellerId(int sellerId);
+    }
+}

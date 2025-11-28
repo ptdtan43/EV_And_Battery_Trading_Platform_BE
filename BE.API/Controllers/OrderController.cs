@@ -1,0 +1,937 @@
+﻿using BE.API.DTOs.Request;
+using BE.API.DTOs.Response;
+using BE.BOs.Models;
+using BE.REPOs.Interface;
+using BE.REPOs.Service;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+
+namespace BE.API.Controllers
+{
+    [ApiController]
+    [Route("api/[controller]")]
+    [Authorize]
+    public class OrderController : ControllerBase
+    {
+        private readonly IOrderRepo _orderRepo;
+        private readonly IUserRepo _userRepo;
+        private readonly IProductRepo _productRepo;
+        private readonly CloudinaryService _cloudinaryService;
+        private readonly INotificationsRepo _notificationsRepo;
+        private readonly IPaymentRepo _paymentRepo;
+
+        public OrderController(IOrderRepo orderRepo, IUserRepo userRepo, IProductRepo productRepo, CloudinaryService cloudinaryService, INotificationsRepo notificationsRepo, IPaymentRepo paymentRepo)
+        {
+            _orderRepo = orderRepo;
+            _userRepo = userRepo;
+            _productRepo = productRepo;
+            _cloudinaryService = cloudinaryService;
+            _notificationsRepo = notificationsRepo;
+            _paymentRepo = paymentRepo;
+        }
+
+        // XEM TẤT CẢ ĐỚN HÀNG (Admin/Staff)
+        // Output: Danh sách tất cả orders với thông tin buyer, seller, product
+        [HttpGet]
+        //[Authorize(Policy = "AdminOnly")]
+        public ActionResult GetAllOrders()
+        {
+            try
+            {
+                // 1️⃣ Lấy tất cả orders từ database
+                var orders = _orderRepo.GetAllOrders();
+                
+                // 2️⃣ Map sang response với thông tin đầy đủ
+                var response = orders.Select(o => new
+                {
+                    o.OrderId,
+                    o.BuyerId,
+                    o.SellerId,
+                    o.ProductId,
+                    o.TotalAmount,
+                    o.DepositAmount,
+                    o.Status,
+                    o.DepositStatus,
+                    o.FinalPaymentStatus,
+                    o.PayoutAmount,
+                    o.PayoutStatus,
+                    o.CreatedDate,
+                    o.CompletedDate,
+                    o.CancellationReason,
+                    o.CancelledDate,
+                    o.ContractUrl, 
+                    BuyerName = o.Buyer?.FullName,
+                    SellerName = o.Seller?.FullName,
+                    Product = new
+                    {
+                        o.Product?.Title,
+                        o.Product?.Price,
+                        o.Product?.Brand,
+                        o.Product?.Model
+                    },
+                    PaymentsCount = o.Payments?.Count ?? 0
+                }).ToList();
+
+                return Ok(response);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Internal server error: " + ex.Message);
+            }
+        }
+
+        // XEM CHI TIẾT ĐƠN HÀNG (Buyer/Seller/Admin)
+        // Input: orderId
+        // Output: Order detail với payments, buyer, seller, product info
+        // Auth: Chỉ buyer, seller hoặc admin mới xem được
+        [HttpGet("{id}")]
+        public ActionResult GetOrderById(int id)
+        {
+            try
+            {
+                // Lấy order by ID
+                var order = _orderRepo.GetOrderById(id);
+                if (order == null)
+                {
+                    return NotFound();
+                }
+
+                // Kiểm tra quyền truy cập (chỉ buyer, seller hoặc admin)
+                var userId = int.Parse(User.FindFirst("UserId")?.Value ?? "0");
+                if (order.BuyerId != userId && order.SellerId != userId && !User.IsInRole("1"))
+                {
+                    return Forbid();
+                }
+
+                var response = new
+                {
+                    order.OrderId,
+                    order.TotalAmount,
+                    order.DepositAmount,
+                    order.Status,
+                    order.DepositStatus,
+                    order.FinalPaymentStatus,
+                    order.PayoutAmount,
+                    order.PayoutStatus,
+                    order.CreatedDate,
+                    order.CompletedDate,
+                    order.CancellationReason,
+                    order.CancelledDate,
+                    order.ContractUrl, 
+                    BuyerName = order.Buyer?.FullName,
+                    SellerName = order.Seller?.FullName,
+                    Product = new
+                    {
+                        order.Product?.Title,
+                        order.Product?.Price
+                    },
+                    Payments = order.Payments?.Select(p => new
+                    {
+                        p.PaymentId,
+                        p.Amount,
+                        p.PaymentType,
+                        p.Status,
+                        p.CreatedDate
+                    })
+                };
+
+                return Ok(response);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Internal server error: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Get order details with contract for admin and staff
+        /// </summary>
+        [HttpGet("details/{id}")]
+        [Authorize(Policy = "AdminOrStaff")]
+        public ActionResult GetOrderDetails(int id)
+        {
+            try
+            {
+                var order = _orderRepo.GetOrderById(id);
+                if (order == null)
+                {
+                    return NotFound(new { message = "Không tìm thấy đơn hàng" });
+                }
+
+                var response = new
+                {
+                    orderId = order.OrderId,
+                    userId = order.BuyerId,
+                    productId = order.ProductId,
+                    productTitle = order.Product?.Title ?? "Unknown",
+                    productImages = order.Product?.ProductImages?.Select(pi => pi.ImageData).ToList() ?? new List<string>(),
+                    buyerName = order.Buyer?.FullName ?? "Unknown",
+                    buyerEmail = order.Buyer?.Email ?? "Unknown",
+                    buyerPhone = order.Buyer?.Phone ?? "Unknown",
+                    sellerId = order.SellerId ?? 0,
+                    sellerName = order.Seller?.FullName ?? "Unknown",
+                    sellerEmail = order.Seller?.Email ?? "Unknown",
+                    sellerPhone = order.Seller?.Phone ?? "Unknown",
+                    orderStatus = order.Status,
+                    depositAmount = order.DepositAmount,
+                    totalAmount = order.TotalAmount,
+                    contractUrl = order.ContractUrl,
+                    createdAt = order.CreatedDate,
+                    updatedAt = order.CreatedDate, // Using CreatedDate as fallback if no UpdatedDate field
+                    completedDate = order.CompletedDate,
+                    finalPaymentDueDate = order.FinalPaymentDueDate,
+                    depositStatus = order.DepositStatus,
+                    finalPaymentStatus = order.FinalPaymentStatus,
+                    cancellationReason = order.CancellationReason,
+                    cancelledDate = order.CancelledDate
+                };
+
+                return Ok(response);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Có lỗi xảy ra khi lấy chi tiết đơn hàng", error = ex.Message });
+            }
+        }
+
+        // TẠO ĐƠN HÀNG MỚI (Member only - Buyer)
+        // Input: { sellerId, productId, totalAmount, depositAmount }
+        // Output: Order info
+        // Flow: Tạo order → Product status = "Reserved" → Buyer thanh toán deposit
+        [HttpPost]
+        [Authorize(Policy = "MemberOnly")]
+        public ActionResult CreateOrder([FromBody] OrderRequest request)
+        {
+            try
+            {
+                // Validation input
+                if (request.SellerId <= 0)
+                    return BadRequest("Valid SellerId is required.");
+                if (request.ProductId <= 0)
+                    return BadRequest("Valid ProductId is required.");
+                if (request.TotalAmount <= 0)
+                    return BadRequest("TotalAmount must be greater than 0.");
+                if (request.DepositAmount < 0)
+                    return BadRequest("DepositAmount cannot be negative.");
+
+                var userId = int.Parse(User.FindFirst("UserId")?.Value ?? "0");
+                if (userId <= 0) return Unauthorized("Invalid user token.");
+
+                // Validate foreign key existence
+                var buyerId = request.BuyerId ?? userId;
+                
+                // Check if Seller exists
+                var seller = _userRepo.GetUserById(request.SellerId!.Value);
+                if (seller == null)
+                    return BadRequest($"Seller with ID {request.SellerId} does not exist.");
+
+                // Check if Product exists
+                var product = _productRepo.GetProductById(request.ProductId!.Value);
+                if (product == null)
+                    return BadRequest($"Product with ID {request.ProductId} does not exist.");
+
+                // Check if Buyer exists (if different from current user)
+                if (buyerId != userId)
+                {
+                    var buyer = _userRepo.GetUserById(buyerId);
+                    if (buyer == null)
+                        return BadRequest($"Buyer with ID {buyerId} does not exist.");
+                }
+
+                var order = new Order
+                {
+                    BuyerId = buyerId, // Use validated buyerId
+                    SellerId = request.SellerId,
+                    ProductId = request.ProductId,
+                    TotalAmount = request.TotalAmount,
+                    DepositAmount = request.DepositAmount,
+                    Status = request.Status ?? "Pending",
+                    DepositStatus = request.DepositStatus ?? "Unpaid",
+                    FinalPaymentStatus = request.FinalPaymentStatus ?? "Unpaid",
+                    FinalPaymentDueDate = request.FinalPaymentDueDate,
+                    PayoutAmount = request.PayoutAmount ?? 0,
+                    PayoutStatus = request.PayoutStatus ?? "Pending",
+                    CreatedDate = DateTime.Now
+                };
+
+                var createdOrder = _orderRepo.CreateOrder(order);
+
+                var response = new
+                {
+                    createdOrder.OrderId,
+                    createdOrder.BuyerId,
+                    createdOrder.SellerId,
+                    createdOrder.ProductId,
+                    createdOrder.TotalAmount,
+                    createdOrder.DepositAmount,
+                    createdOrder.Status,
+                    createdOrder.DepositStatus,
+                    createdOrder.FinalPaymentStatus,
+                    createdOrder.CreatedDate
+                };
+
+                return Ok(response);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Internal server error: " + ex.Message);
+            }
+        }
+
+        [HttpPut("{id}/status")]
+        public ActionResult UpdateOrderStatus(int id, [FromBody] OrderRequest request)
+        {
+            try
+            {
+                var order = _orderRepo.GetOrderById(id);
+                if (order == null)
+                {
+                    return NotFound();
+                }
+
+                // Verify if user has access to update this order
+                var userId = int.Parse(User.FindFirst("UserId")?.Value ?? "0");
+                if (order.BuyerId != userId && order.SellerId != userId && !User.IsInRole("1"))
+                {
+                    return Forbid();
+                }
+
+                // Lưu trạng thái cũ để so sánh
+                var oldStatus = order.Status;
+                order.Status = request.Status;
+                var updatedOrder = _orderRepo.UpdateOrder(order);
+
+                // Logic cập nhật Product status khi seller xác nhận
+                if (order.SellerId == userId && 
+                    (request.Status == "Confirmed" || request.Status == "Completed") &&
+                    oldStatus != request.Status &&
+                    order.ProductId.HasValue)
+                {
+                    var product = _productRepo.GetProductById(order.ProductId.Value);
+                    if (product != null && product.Status == "Reserved")
+                    {
+                        product.Status = "Sold";
+                        _productRepo.UpdateProduct(product);
+                    }
+                }
+
+                var response = new
+                {
+                    updatedOrder.OrderId,
+                    updatedOrder.Status,
+                    UpdatedDate = DateTime.Now,
+                    ProductStatusUpdated = (order.SellerId == userId && 
+                                          (request.Status == "Confirmed" || request.Status == "Completed") &&
+                                          oldStatus != request.Status &&
+                                          order.ProductId.HasValue)
+                };
+
+                return Ok(response);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Internal server error: " + ex.Message);
+            }
+        }
+
+        [HttpPost("test-seller-confirm/{orderId}")]
+        [Authorize(Policy = "AdminOnly")]
+        public ActionResult TestSellerConfirm(int orderId, [FromBody] TestSellerConfirmRequest request)
+        {
+            try
+            {
+                var order = _orderRepo.GetOrderById(orderId);
+                if (order == null)
+                {
+                    return NotFound("Order not found");
+                }
+
+                // Simulate seller confirmation
+                var oldStatus = order.Status;
+                order.Status = request.NewStatus;
+                var updatedOrder = _orderRepo.UpdateOrder(order);
+
+                // Apply seller confirmation logic
+                bool productStatusUpdated = false;
+                if (order.SellerId == request.SellerId && 
+                    (request.NewStatus == "Confirmed" || request.NewStatus == "Completed") &&
+                    oldStatus != request.NewStatus &&
+                    order.ProductId.HasValue)
+                {
+                    var product = _productRepo.GetProductById(order.ProductId.Value);
+                    if (product != null && product.Status == "Reserved")
+                    {
+                        product.Status = "Sold";
+                        _productRepo.UpdateProduct(product);
+                        productStatusUpdated = true;
+                    }
+                }
+
+                var response = new
+                {
+                    OrderId = updatedOrder.OrderId,
+                    OldStatus = oldStatus,
+                    NewStatus = updatedOrder.Status,
+                    SellerId = order.SellerId,
+                    ProductId = order.ProductId,
+                    ProductStatusUpdated = productStatusUpdated,
+                    UpdatedDate = DateTime.Now
+                };
+
+                return Ok(response);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Test seller confirm error: " + ex.Message);
+            }
+        }
+
+        [HttpGet("buyer")]
+        [Authorize(Policy = "MemberOnly")]
+        public ActionResult GetMyPurchases()
+        {
+            try
+            {
+                var userId = int.Parse(User.FindFirst("UserId")?.Value ?? "0");
+                var orders = _orderRepo.GetOrdersByBuyerId(userId);
+
+                // FIX: Group by ProductId and keep only the most recent order for each product
+                // Priority: Completed orders first, then by CreatedDate descending
+                var uniqueOrders = orders
+                    .GroupBy(o => o.ProductId)
+                    .Select(g => g
+                        .OrderByDescending(o => o.Status == "Completed" ? 1 : 0) // Completed first
+                        .ThenByDescending(o => o.CompletedDate ?? o.CreatedDate) // Most recent first
+                        .First())
+                    .OrderByDescending(o => o.CompletedDate ?? o.CreatedDate) // ✅ Sort final list by date (newest first)
+                    .ToList();
+
+                var response = uniqueOrders.Select(o => new
+                {
+                    o.OrderId,
+                    o.BuyerId,
+                    o.TotalAmount,
+                    o.DepositAmount,
+                    o.Status,
+                    OrderStatus = o.Status,
+                    o.DepositStatus,
+                    o.FinalPaymentStatus,
+                    o.CreatedDate,
+                    o.CompletedDate,
+                    o.CancellationReason,
+                    o.CancelledDate,
+                    o.ContractUrl, // thêm
+                    PurchaseDate = o.CompletedDate ?? o.CreatedDate,
+                    SellerName = o.Seller?.FullName ?? "N/A",
+                    SellerId = o.SellerId,
+                    Product = o.Product != null ? new
+                    {
+                        ProductId = (int?)o.Product.ProductId,
+                        Title = o.Product.Title,
+                        Price = o.Product.Price,
+                        ProductType = o.Product.ProductType ?? string.Empty,
+                        Status = o.Product.Status ?? (string?)null,
+                        Brand = o.Product.Brand ?? string.Empty,
+                        Model = o.Product.Model,
+                        Condition = o.Product.Condition,
+                        VehicleType = o.Product.VehicleType,
+                        LicensePlate = o.Product.LicensePlate,
+                        ImageData = o.Product.ProductImages?.FirstOrDefault()?.ImageData
+                    } : new
+                    {
+                        ProductId = (int?)null,
+                        Title = "Sản phẩm không tìm thấy",
+                        Price = o.TotalAmount,
+                        ProductType = string.Empty,
+                        Status = (string?)"Unknown",
+                        Brand = string.Empty,
+                        Model = (string?)null,
+                        Condition = (string?)null,
+                        VehicleType = (string?)null,
+                        LicensePlate = (string?)null,
+                        ImageData = (string?)null
+                    },
+                    DebugInfo = new
+                    {
+                        HasProduct = o.Product != null,
+                        ProductId = o.ProductId,
+                        OrderStatus = o.Status,
+                        IsCompleted = o.Status == "Completed"
+                    }
+                }).ToList();
+
+
+                return Ok(response);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Internal server error: " + ex.Message);
+            }
+        }
+
+        [HttpGet("seller")]
+        [Authorize(Policy = "MemberOnly")]
+        public ActionResult GetMySales()
+        {
+            try
+            {
+                var userId = int.Parse(User.FindFirst("UserId")?.Value ?? "0");
+                var orders = _orderRepo.GetOrdersBySellerId(userId);
+
+                var response = orders.Select(o => new
+                {
+                    o.OrderId,
+                    ProductId = o.ProductId,
+                    o.TotalAmount,
+                    o.DepositAmount,
+                    o.Status,
+                    OrderStatus = o.Status,
+                    o.DepositStatus,
+                    o.PayoutStatus,
+                    o.CreatedDate,
+                    o.CompletedDate,
+                    o.CancellationReason,
+                    o.CancelledDate,
+                    o.ContractUrl, // thêm
+                    BuyerName = o.Buyer?.FullName,
+                    BuyerId = o.BuyerId,
+                    Product = o.Product != null ? new
+                    {
+                        ProductId = o.Product.ProductId,
+                        o.Product.Title,
+                        o.Product.Price,
+                        Status = o.Product.Status,
+                        ProductType = o.Product.ProductType ?? string.Empty,
+                        Brand = o.Product.Brand ?? string.Empty,
+                        Model = o.Product.Model,
+                        Condition = o.Product.Condition,
+                        VehicleType = o.Product.VehicleType,
+                        LicensePlate = o.Product.LicensePlate,
+                        ImageData = o.Product.ProductImages?.FirstOrDefault()?.ImageData
+                    } : null
+                }).ToList();
+
+                return Ok(response);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Internal server error: " + ex.Message);
+            }
+        }
+
+        [HttpGet("debug-purchases")]
+        [Authorize(Policy = "AdminOnly")]
+        public ActionResult DebugPurchases()
+        {
+            try
+            {
+                var orders = _orderRepo.GetAllOrders();
+                
+                var problematicOrders = orders.Where(o => 
+                    o.Status == "Completed" && 
+                    (o.Product == null || o.CompletedDate == null)
+                ).ToList();
+
+                var debugInfo = new
+                {
+                    TotalOrders = orders.Count,
+                    CompletedOrders = orders.Count(o => o.Status == "Completed"),
+                    ProblematicOrders = problematicOrders.Count,
+                    ProblematicDetails = problematicOrders.Select(o => new
+                    {
+                        o.OrderId,
+                        o.BuyerId,
+                        o.SellerId,
+                        o.ProductId,
+                        o.Status,
+                        o.CreatedDate,
+                        o.CompletedDate,
+                        HasProduct = o.Product != null,
+                        ProductTitle = o.Product?.Title ?? "NULL",
+                        ProductStatus = o.Product?.Status ?? "NULL"
+                    }).ToList(),
+                    AllCompletedOrders = orders.Where(o => o.Status == "Completed").Select(o => new
+                    {
+                        o.OrderId,
+                        o.ProductId,
+                        o.Status,
+                        o.CompletedDate,
+                        ProductExists = o.Product != null,
+                        ProductTitle = o.Product?.Title
+                    }).ToList()
+                };
+
+                return Ok(debugInfo);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Debug error: " + ex.Message);
+            }
+        }
+
+        [HttpPost("fix-completed-orders")]
+        [Authorize(Policy = "AdminOnly")]
+        public ActionResult FixCompletedOrders()
+        {
+            try
+            {
+                var orders = _orderRepo.GetAllOrders();
+                var fixedCount = 0;
+                var errors = new List<string>();
+
+                foreach (var order in orders.Where(o => o.Status == "Completed"))
+                {
+                    try
+                    {
+                        // Fix missing CompletedDate
+                        if (!order.CompletedDate.HasValue)
+                        {
+                            order.CompletedDate = order.CreatedDate ?? DateTime.Now;
+                            _orderRepo.UpdateOrder(order);
+                            fixedCount++;
+                        }
+
+                        // Check if product exists and is properly linked
+                        if (order.ProductId.HasValue && order.Product == null)
+                        {
+                            var product = _productRepo.GetProductById(order.ProductId.Value);
+                            if (product == null)
+                            {
+                                errors.Add($"Order {order.OrderId}: Product {order.ProductId} not found");
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        errors.Add($"Error fixing order {order.OrderId}: {ex.Message}");
+                    }
+                }
+
+                return Ok(new
+                {
+                    message = "Fix completed orders process finished",
+                    fixedCount = fixedCount,
+                    totalCompletedOrders = orders.Count(o => o.Status == "Completed"),
+                    errors = errors,
+                    timestamp = DateTime.Now
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, "Fix error: " + ex.Message);
+            }
+        }
+
+		[HttpPost("{id}/admin-reject")]
+		[Authorize(Policy = "AdminOnly")]
+		public ActionResult AdminRejectOrder(int id, [FromBody] AdminRejectOrderRequest request)
+		{
+			try
+			{
+				if (request == null || string.IsNullOrWhiteSpace(request.Reason) || request.Reason.Trim().Length < 3)
+					return BadRequest("Reason is required (min 3 characters).");
+
+				var order = _orderRepo.GetOrderById(id);
+				if (order == null) return NotFound("Order not found.");
+
+				if (string.Equals(order.Status, "Completed", StringComparison.OrdinalIgnoreCase))
+					return BadRequest("Cannot reject a completed order.");
+
+				order.Status = "Cancelled";
+				order.CompletedDate = null;
+				order.CancellationReason = request.Reason;
+				order.CancelledDate = DateTime.Now;
+
+				var updated = _orderRepo.UpdateOrder(order);
+
+				if (order.ProductId.HasValue)
+				{
+					var product = _productRepo.GetProductById(order.ProductId.Value);
+					if (product != null && string.Equals(product.Status, "Reserved", StringComparison.OrdinalIgnoreCase))
+					{
+						product.Status = "Active";
+						_productRepo.UpdateProduct(product);
+					}
+				}
+
+				return Ok(new
+				{
+					updated.OrderId,
+					updated.Status,
+					Reason = request.Reason,
+					CancelledDate = updated.CancelledDate,
+					Message = "Order rejected successfully."
+				});
+			}
+			catch (Exception ex)
+			{
+				return StatusCode(500, "Internal server error: " + ex.Message);
+			}
+		}
+
+		[HttpPost("{id}/staff-reject")]
+		[Authorize(Policy = "AdminOrStaff")]
+		public ActionResult StaffRejectOrder(int id, [FromBody] AdminRejectOrderRequest request)
+		{
+			try
+			{
+				// Validate request
+				if (request == null || string.IsNullOrWhiteSpace(request.Reason) || request.Reason.Trim().Length < 3)
+					return BadRequest("Reason is required (min 3 characters).");
+
+				// Get current user
+				var userIdStr = User.FindFirst("UserId")?.Value;
+				if (string.IsNullOrEmpty(userIdStr) || !int.TryParse(userIdStr, out var userId))
+					return Unauthorized("Invalid user token");
+
+				// Verify user is Staff or Admin
+				var userRole = User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value ?? "";
+				if (userRole != "3" && userRole != "1") // 3 = Staff, 1 = Admin
+					return Forbid("Only Staff and Admin can reject orders");
+
+				// Get order
+				var order = _orderRepo.GetOrderById(id);
+				if (order == null) 
+					return NotFound("Order not found.");
+
+				// Check if order can be rejected - CHỈ cho phép reject "Deposited"
+				if (!string.Equals(order.Status, "Deposited", StringComparison.OrdinalIgnoreCase))
+					return BadRequest($"Cannot reject order with status: {order.Status}. Only orders with status 'Deposited' can be rejected.");
+
+				// Update order status
+				order.Status = "Cancelled";
+				order.CompletedDate = null;
+                string refundNote = request.RefundOption == "refund"
+                                                        ? "\n\nThông tin hoàn tiền: Đơn hàng này sẽ được hoàn tiền. Người mua vui lòng liên hệ hệ thống thông qua số điện thoại hoặc trực tiếp đến chi nhánh cửa hàng để trao đổi."
+                                                        : "\n\nThông tin hoàn tiền: Đơn hàng này không được hoàn tiền theo điều khoản hủy giao dịch.";
+                order.CancellationReason = request.Reason + refundNote;
+                order.CancelledDate = DateTime.Now;
+
+				var updated = _orderRepo.UpdateOrder(order);
+
+				// Update product status back to Active if it was Reserved
+				bool productStatusUpdated = false;
+				if (order.ProductId.HasValue)
+				{
+					var product = _productRepo.GetProductById(order.ProductId.Value);
+					if (product != null && string.Equals(product.Status, "Reserved", StringComparison.OrdinalIgnoreCase))
+					{
+						product.Status = "Active";
+						_productRepo.UpdateProduct(product);
+						productStatusUpdated = true;
+					}
+				}
+
+				// Calculate refund amount (xử lý ngoài hệ thống, chỉ trả về thông tin)
+				decimal refundAmount = 0;
+				if (request.RefundOption == "refund" && order.DepositAmount > 0)
+				{
+					refundAmount = order.DepositAmount;
+				}
+
+				// Send notifications to Buyer and Seller
+				try
+				{
+					// Notification cho Buyer
+					if (order.BuyerId.HasValue)
+					{
+						var buyerNotification = new Notification
+						{
+							UserId = order.BuyerId.Value,
+							NotificationType = "OrderCancelled",
+							Title = "Đơn hàng đã bị từ chối",
+							Content = $"Đơn hàng #{order.OrderId} đã bị từ chối bởi Staff. Lý do: {request.Reason}. " +
+							          (refundAmount > 0 ? $"Tiền cọc {refundAmount:N0} VND sẽ được hoàn lại." : ""),
+							CreatedDate = DateTime.Now,
+							IsRead = false
+						};
+						_notificationsRepo.CreateNotification(buyerNotification);
+					}
+
+					// Notification cho Seller
+					if (order.SellerId.HasValue)
+					{
+						var sellerNotification = new Notification
+						{
+							UserId = order.SellerId.Value,
+							NotificationType = "OrderCancelled",
+							Title = "Đơn hàng đã bị hủy",
+							Content = $"Đơn hàng #{order.OrderId} đã bị hủy bởi Staff. Lý do: {request.Reason}.",
+							CreatedDate = DateTime.Now,
+							IsRead = false
+						};
+						_notificationsRepo.CreateNotification(sellerNotification);
+					}
+				}
+				catch (Exception notifEx)
+				{
+					// Log error nhưng không throw để không ảnh hưởng việc reject order
+					System.Diagnostics.Debug.WriteLine($"Error sending notifications: {notifEx.Message}");
+				}
+
+				return Ok(new
+				{
+					orderId = updated.OrderId,
+					status = updated.Status,
+					reason = request.Reason,
+					cancelledDate = updated.CancelledDate,
+					refundAmount = refundAmount,
+					refundOption = request.RefundOption,
+					buyerId = order.BuyerId,
+					sellerId = order.SellerId,
+					productStatusUpdated = productStatusUpdated,
+					message = "Order rejected successfully by staff.",
+					note = refundAmount > 0 ? "Refund will be processed manually outside the system." : null
+				});
+			}
+			catch (Exception ex)
+			{
+				return StatusCode(500, "Internal server error: " + ex.Message);
+			}
+		}
+        
+        [HttpPost("{orderId}/upload-contract")]
+        [Authorize(Policy = "StaffOnly")]
+        public async Task<IActionResult> UploadContract(int orderId, IFormFile file)
+        {
+            try
+            {
+                if (file == null || file.Length == 0)
+                    return BadRequest(new { message = "Không có file được tải lên." });
+
+                var order = _orderRepo.GetOrderById(orderId);
+                if (order == null)
+                    return NotFound(new { message = $"Không tìm thấy đơn hàng với ID = {orderId}." });
+
+                // Nếu đơn hàng đã có hợp đồng trước đó → xóa khỏi Cloudinary
+                if (!string.IsNullOrEmpty(order.ContractUrl))
+                {
+                    try
+                    {
+                        // Cloudinary URL có dạng: https://res.cloudinary.com/.../contracts/abc123.pdf
+                        // publicId là phần sau folder, ví dụ "contracts/abc123"
+                        var uri = new Uri(order.ContractUrl);
+                        var fileName = Path.GetFileNameWithoutExtension(uri.AbsolutePath);
+                        var folderName = Path.GetDirectoryName(uri.AbsolutePath)?
+                            .Replace("/","/")
+                            .TrimStart('/');
+                        var publicId = $"{folderName}/{fileName}";
+                        await _cloudinaryService.DeleteImageAsync(publicId);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Không thể xóa file cũ: {ex.Message}");
+                    }
+                }
+
+                // Upload file mới lên Cloudinary
+                string contractUrl = await _cloudinaryService.UploadFileAsync(file, "contracts");
+
+                // Cập nhật vào DB
+                order.ContractUrl = contractUrl;
+                _orderRepo.UpdateOrder(order);
+
+                return Ok(new
+                {
+                    message = "Upload hợp đồng thành công.",
+                    orderId = order.OrderId,
+                    contractUrl
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Lỗi khi upload hợp đồng.", error = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// Get revenue statistics for admin dashboard
+        /// Tính tổng doanh thu bao gồm:
+        /// 1. Doanh thu từ đơn hàng hoàn thành (Completed)
+        /// 2. Doanh thu từ phí kiểm định (Verification)
+        /// 3. Doanh thu từ đơn hàng bị hủy không hoàn tiền (Cancelled with no refund)
+        /// 4. Doanh thu từ bán gói credit (PostCredit)
+        /// </summary>
+        [HttpGet("revenue-statistics")]
+        [Authorize(Policy = "AdminOrStaff")]
+        public ActionResult<RevenueStatisticsResponse> GetRevenueStatistics()
+        {
+            try
+            {
+                // 1. Doanh thu từ đơn hàng hoàn thành (Completed orders)
+                var completedOrders = _orderRepo.GetAllOrders()
+                    .Where(o => string.Equals(o.Status, "Completed", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                
+                var completedOrdersRevenue = completedOrders.Sum(o => o.DepositAmount);
+                var completedOrdersCount = completedOrders.Count;
+
+                // 2. Doanh thu từ phí kiểm định (Verification payments)
+                var verificationPayments = _paymentRepo.GetAllPayments()
+                    .Where(p => string.Equals(p.PaymentType, "Verification", StringComparison.OrdinalIgnoreCase) 
+                                && string.Equals(p.Status, "Success", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                
+                var verificationRevenue = verificationPayments.Sum(p => p.Amount);
+                var verificationPaymentsCount = verificationPayments.Count;
+
+                // 3. Doanh thu từ đơn hàng bị hủy không hoàn tiền (Cancelled orders with no refund)
+                var cancelledOrders = _orderRepo.GetAllOrders()
+                    .Where(o => string.Equals(o.Status, "Cancelled", StringComparison.OrdinalIgnoreCase)
+                                && !string.IsNullOrEmpty(o.CancellationReason)
+                                && o.CancellationReason.Contains("không được hoàn tiền", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                var cancelledNoRefundRevenue = cancelledOrders.Sum(o => o.DepositAmount);
+                var cancelledNoRefundCount = cancelledOrders.Count;
+
+                // 4. Doanh thu từ bán gói credit (PostCredit packages)
+                var creditPackagePayments = _paymentRepo.GetAllPayments()
+                    .Where(p => string.Equals(p.PaymentType, "PostCredit", StringComparison.OrdinalIgnoreCase)
+                                && string.Equals(p.Status, "Success", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                
+                var creditPackagesRevenue = creditPackagePayments.Sum(p => p.Amount);
+                var creditPackagesSoldCount = creditPackagePayments.Count;
+
+                // Chi tiết các đơn hàng bị hủy không hoàn tiền
+                var cancelledNoRefundDetails = cancelledOrders.Select(o => new CancelledNoRefundOrderDetail
+                {
+                    OrderId = o.OrderId,
+                    DepositAmount = o.DepositAmount,
+                    CancelledDate = o.CancelledDate,
+                    CancellationReason = o.CancellationReason,
+                    BuyerId = o.BuyerId,
+                    BuyerName = o.Buyer?.FullName,
+                    SellerId = o.SellerId,
+                    SellerName = o.Seller?.FullName,
+                    ProductId = o.ProductId,
+                    ProductTitle = o.Product?.Title
+                }).ToList();
+
+                // Tổng doanh thu (bao gồm cả gói credit)
+                var totalRevenue = completedOrdersRevenue + verificationRevenue + cancelledNoRefundRevenue + creditPackagesRevenue;
+
+                var response = new RevenueStatisticsResponse
+                {
+                    CompletedOrdersRevenue = completedOrdersRevenue,
+                    VerificationRevenue = verificationRevenue,
+                    CancelledNoRefundRevenue = cancelledNoRefundRevenue,
+                    CreditPackagesRevenue = creditPackagesRevenue,
+                    TotalRevenue = totalRevenue,
+                    CompletedOrdersCount = completedOrdersCount,
+                    VerificationPaymentsCount = verificationPaymentsCount,
+                    CancelledNoRefundCount = cancelledNoRefundCount,
+                    CreditPackagesSoldCount = creditPackagesSoldCount,
+                    CancelledNoRefundOrders = cancelledNoRefundDetails
+                };
+
+                return Ok(response);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = "Lỗi khi tính toán doanh thu", error = ex.Message });
+            }
+        }
+    }
+}
